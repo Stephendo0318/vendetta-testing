@@ -5,7 +5,7 @@ import { Forms } from "@vendetta/ui/components";
 import { showToast } from "@vendetta/ui/toasts";
 
 import { clearPostCache } from "./api";
-import { DEFAULT_INSTAGRAM_DOMAIN, DEFAULT_TIKTOK_DOMAIN, refreshVisible } from "./runtime";
+import { DEFAULT_DOMAINS, diagnose, refreshVisible } from "./runtime";
 
 // Fall back to plain React Native widgets if this build of the client doesn't expose a Forms component.
 const F: any = Forms ?? {};
@@ -39,8 +39,39 @@ const OPTIONS = [
     { key: "showPoll", label: "Show polls", sub: "X only." }
 ];
 
+const PHOTO_STYLES = [
+    { key: "native", label: "Separate image embeds", sub: "Card, then the photos as their own embeds (how Discord shows a bare image link)." },
+    { key: "card", label: "Photo inside the card", sub: "Photo sits in the same embed as the text." },
+    { key: "thumb", label: "Small thumbnail", sub: "Photo as the card's small corner image." }
+] as const;
+
+const HOSTS = [
+    { key: "xDomains", title: "X fallback hosts", note: "Used when the API has no media for a quote post." },
+    { key: "tiktokDomains", title: "TikTok hosts" },
+    { key: "instagramDomains", title: "Instagram hosts" },
+    { key: "redditDomains", title: "Reddit fallback hosts", note: "Used when reddit.com blocks the lookup." }
+] as const;
+
 export default function Settings() {
     useProxy(storage);
+    const [testUrl, setTestUrl] = React.useState("");
+    const [report, setReport] = React.useState("");
+    const [busy, setBusy] = React.useState(false);
+    const style = PHOTO_STYLES.find(p => p.key === storage.photoStyle) ?? PHOTO_STYLES[0];
+
+    const runTest = async () => {
+        if (busy) return;
+        setBusy(true);
+        setReport("Testing...");
+        try {
+            setReport(await diagnose(testUrl));
+        } catch (e: any) {
+            setReport(`Test crashed: ${String(e?.message ?? e)}`);
+        } finally {
+            setBusy(false);
+        }
+    };
+
     return (
         <RN.ScrollView>
             <FormSection title="Platforms" android_noDivider>
@@ -65,22 +96,40 @@ export default function Settings() {
                     />
                 ))}
             </FormSection>
-            <FormSection title="Proxy domains">
-                <FormInput
-                    title="TikTok embed domain"
-                    placeholder={DEFAULT_TIKTOK_DOMAIN}
-                    value={typeof storage.tiktokDomain === "string" ? storage.tiktokDomain : DEFAULT_TIKTOK_DOMAIN}
-                    onChange={(v: string) => { storage.tiktokDomain = v.trim(); clearPostCache(); }}
+            <FormSection title="Photos">
+                <FormRow
+                    label={`Photo display: ${style.label}`}
+                    subLabel={`${style.sub} Tap to change.`}
+                    onPress={() => {
+                        const next = PHOTO_STYLES[(PHOTO_STYLES.findIndex(p => p.key === style.key) + 1) % PHOTO_STYLES.length];
+                        storage.photoStyle = next.key;
+                        refreshVisible();
+                    }}
                 />
-                <FormInput
-                    title="Instagram embed domain"
-                    placeholder={DEFAULT_INSTAGRAM_DOMAIN}
-                    value={typeof storage.instagramDomain === "string" ? storage.instagramDomain : DEFAULT_INSTAGRAM_DOMAIN}
-                    onChange={(v: string) => { storage.instagramDomain = v.trim(); clearPostCache(); }}
-                />
+            </FormSection>
+            <FormSection title="Embed hosts">
+                {HOSTS.map(h => (
+                    <FormInput
+                        key={h.key}
+                        title={h.title}
+                        placeholder={DEFAULT_DOMAINS[h.key]}
+                        value={typeof storage[h.key] === "string" ? storage[h.key] : DEFAULT_DOMAINS[h.key]}
+                        onChange={(v: string) => { storage[h.key] = v.trim(); clearPostCache(); }}
+                    />
+                ))}
                 <FormText style={{ marginHorizontal: 16, opacity: 0.6 }}>
-                    FxEmbed-style services whose Open Graph tags include playable video. Leave empty to read the real site (TikTok then falls back to a thumbnail card; Instagram usually hits a login wall).
+                    Comma-separated FxEmbed-style hosts. All are asked at once and the first useful answer wins, so a dead host costs nothing. Clear a field to restore the default after an update.
                 </FormText>
+            </FormSection>
+            <FormSection title="Test a link">
+                <FormInput
+                    title="Link"
+                    placeholder="Paste an x.com / reddit / tiktok / instagram link"
+                    value={testUrl}
+                    onChange={(v: string) => setTestUrl(v)}
+                />
+                <FormRow label={busy ? "Testing..." : "Run test"} subLabel="Shows which source answered or why each one failed." onPress={runTest} />
+                {report ? <RN.Text selectable style={{ margin: 16, fontFamily: "monospace", fontSize: 12, opacity: 0.85 }}>{report}</RN.Text> : null}
             </FormSection>
             <FormSection title="Cache">
                 <FormRow

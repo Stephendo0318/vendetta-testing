@@ -1,7 +1,14 @@
 import type { Post, PostLink, Provider, XMedia } from "./api";
 
 export type Providers = Record<Provider, boolean>;
-export interface EmbedOptions { hideOriginal: boolean; showStats: boolean; showQuote: boolean; showPoll: boolean; maxMedia: number; providers: Providers; }
+/**
+ * How photos are drawn:
+ *  - "native": the card (text/author/footer) followed by Discord-style image embeds, the same shape Discord makes for a bare image link
+ *  - "card":   the photo inside the card
+ *  - "thumb":  the photo as the card's small thumbnail
+ */
+export type PhotoStyle = "native" | "card" | "thumb";
+export interface EmbedOptions { hideOriginal: boolean; showStats: boolean; showQuote: boolean; showPoll: boolean; maxMedia: number; photoStyle: PhotoStyle; providers: Providers; }
 
 const MARKER = "FxEmbed";
 const COLORS: Record<Provider, number> = { x: 0x6364ff, reddit: 0xff4500, instagram: 0xe1306c, tiktok: 0xfe2c55 };
@@ -73,6 +80,8 @@ function compact(n: number) {
 
 const dims = (m: XMedia) => ({ ...(m.width ? { width: m.width } : {}), ...(m.height ? { height: m.height } : {}) });
 const asMedia = (m: XMedia, url: string) => ({ url, proxy_url: url, ...dims(m) });
+// An image with no size can collapse to nothing in the client, so photos always carry one (a guess is better than invisible).
+const asPhoto = (m: XMedia, url: string) => ({ url, proxy_url: url, width: m.width ?? 1280, height: m.height ?? 720 });
 
 function description(post: Post, o: EmbedOptions) {
     const parts: string[] = [];
@@ -149,14 +158,27 @@ export function buildEmbeds(post: Post, o: EmbedOptions): any[] {
         head.author = { name: post.name, ...(post.authorUrl ? { url: post.authorUrl } : {}) };
     }
 
+    const style: PhotoStyle = o.photoStyle ?? "native";
     const mediaFields = ({ kind, m }: { kind: Kind; m: XMedia; }) => {
-        if (kind === "photo") return { type: "rich", image: asMedia(m, m.url) };
+        if (kind === "photo") return style === "thumb" ? { type: "rich", thumbnail: asPhoto(m, m.url) } : { type: "rich", image: asPhoto(m, m.url) };
         return { type: kind, video: asMedia(m, m.url), ...(m.thumbnail ? { thumbnail: asMedia(m, m.thumbnail) } : {}) };
     };
+    const extra = (item: { kind: Kind; m: XMedia; }) => ({ url: post.url, provider: { name: MARKER }, ...mediaFields(item) });
 
     if (!media.length) return [{ ...head, type: "rich" }];
+
+    if (style === "native") {
+        const videos = media.filter(i => i.kind !== "photo");
+        const photos = media.filter(i => i.kind === "photo");
+        const out: any[] = videos.length ? [{ ...head, ...mediaFields(videos[0]) }, ...videos.slice(1).map(extra)] : [{ ...head, type: "rich" }];
+        for (const { m } of photos) out.push({ type: "image", url: m.url, provider: { name: MARKER }, thumbnail: asPhoto(m, m.url) });
+        return out;
+    }
+
+    // A card with only an image and no text can render as nothing; give it an invisible body.
+    if (media[0].kind === "photo" && !head.description && !head.title) head.description = "\u200b";
     // Extra items share the same url, which Discord groups into one gallery.
-    return media.map((item, i) => i === 0 ? { ...head, ...mediaFields(item) } : { url: post.url, provider: { name: MARKER }, ...mediaFields(item) });
+    return media.map((item, i) => i === 0 ? { ...head, ...mediaFields(item) } : extra(item));
 }
 
 /** Replaces Discord's own embeds for the given links (if enabled) and appends ours. */

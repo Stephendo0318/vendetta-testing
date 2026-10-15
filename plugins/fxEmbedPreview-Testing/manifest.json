@@ -1,6 +1,6 @@
 {
-    "name": "FxEmbedPreview-Testing",
-    "description": "Local FxEmbed-style previews for X/Twitter links. Message text is never changed.",
+    "name": "FxEmbedPreview",
+    "description": "FxEmbed-style previews for X/Twitter (plus Reddit, TikTok, Instagram) links. Message text is never changed.",
     "authors": [{ "name": "You", "id": "0" }],
     "main": "src/index.ts",
     "vendetta": { "icon": "ic_link" }

@@ -4,7 +4,7 @@
 export type Provider = "x" | "reddit" | "instagram" | "tiktok";
 
 export interface PostLink { provider: Provider; key: string; url: string; username?: string; id?: string; }
-export interface FetchConfig { tiktokDomain: string; instagramDomain: string; }
+export interface FetchConfig { tiktokDomains: string; instagramDomains: string; redditDomains: string; xDomains: string; }
 
 export interface XMedia { url: string; thumbnail?: string; type?: string; width?: number; height?: number; }
 export interface XPoll { choices: Array<{ label?: string; percentage?: number; }>; totalVotes?: number; timeLeft?: string; }
@@ -43,13 +43,23 @@ const isoFromSeconds = (s: unknown) => typeof s === "number" ? new Date(s * 1000
 
 interface Res { status: number; text: string; url: string; }
 
+// Optional step log used by the in-app "Test a link" screen.
+let trace: string[] | null = null;
+const note = (line: string) => { trace?.push(line); };
+const shortUrl = (u: string) => u.replace(/^https?:\/\//i, "").replace(/\?.*$/, "").slice(0, 80);
+
 async function request(url: string, headers: Record<string, string> = {}, ms = 12000): Promise<Res> {
     const ctrl = typeof AbortController !== "undefined" ? new AbortController() : undefined;
     const timer = setTimeout(() => ctrl?.abort(), ms);
+    const t0 = Date.now();
     try {
         const res = await fetch(url, { signal: ctrl?.signal, headers });
         const text = await res.text().catch(() => "");
+        note(`GET ${shortUrl(url)} -> HTTP ${res.status}, ${text.length} bytes, ${Date.now() - t0} ms${res.url && res.url !== url ? ` (redirected to ${shortUrl(res.url)})` : ""}`);
         return { status: res.status, text, url: res.url || url };
+    } catch (e: any) {
+        note(`GET ${shortUrl(url)} -> FAILED: ${e?.name === "AbortError" ? "timed out" : String(e?.message ?? e)}`);
+        throw e;
     } finally {
         clearTimeout(timer);
     }
@@ -120,8 +130,8 @@ function readMetaTags(html: string) {
 
 interface Og { title?: string; description?: string; image?: string; video?: string; }
 
-async function fetchOg(url: string, ua: string): Promise<Og | null> {
-    const r = await request(url, { "User-Agent": ua, Accept: "text/html,application/xhtml+xml" }, 15000);
+async function fetchOg(url: string, ua: string, ms = 15000): Promise<Og | null> {
+    const r = await request(url, { "User-Agent": ua, Accept: "text/html,application/xhtml+xml" }, ms);
     if (!ok(r)) return null;
     const html = r.text.slice(0, 1_000_000);
     const meta = readMetaTags(html);
@@ -148,11 +158,38 @@ function postFromOg(provider: Provider, url: string, og: Og): Post {
     };
 }
 
+export const domainList = (value: string | undefined) =>
+    (value ?? "").split(/[\s,;]+/).map(d => d.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "")).filter(Boolean);
+
+/** Resolves with the first non-null result; null once every task has finished without one. */
+function firstOf<T>(tasks: Array<Promise<T | null>>): Promise<T | null> {
+    return new Promise(resolve => {
+        let left = tasks.length;
+        if (!left) return resolve(null);
+        tasks.forEach(t => t.then(v => { if (v) resolve(v); }, () => { /* logged in request() */ }).then(() => { if (--left === 0) resolve(null); }));
+    });
+}
+
+/** Asks several FxEmbed-style hosts at once (e.g. tnktok.com, tfxktok.com) and uses whichever answers usefully first. */
+function ogViaProxies(url: string, base: string, domains: string[], useful: (og: Og) => boolean): Promise<Og | null> {
+    return firstOf(domains.map(async d => {
+        const og = await fetchOg(swapHost(url, base, d), BOT_UA, 9000);
+        if (!og) { note(`${d}: no Open Graph data`); return null; }
+        if (!useful(og)) { note(`${d}: page had no usable media (title: ${(og.title ?? "-").slice(0, 40)})`); return null; }
+        note(`${d}: OK (video: ${og.video ? "yes" : "no"}, image: ${og.image ? "yes" : "no"})`);
+        return og;
+    }));
+}
+
 // ---------- X / Twitter ----------
 
 function normalizeFx(s: any, url: string): Post {
     const quote = s.quote && s.quote.type !== "tombstone" ? s.quote : undefined;
-    const rawVideos: any[] = s.media?.videos?.length ? s.media.videos : quote?.media?.videos ?? [];
+    const isVid = (m: any) => /video|gif/i.test(m?.type ?? "") && m?.url;
+    const quoteVideos: any[] = quote?.media?.videos?.length ? quote.media.videos : (quote?.media?.all ?? []).filter(isVid);
+    const rawVideos: any[] = s.media?.videos?.length ? s.media.videos : quoteVideos;
+    // A quote post's own photos are shown too when the quoting post has no media of its own.
+    const rawPhotos: any[] = s.media?.photos?.length ? s.media.photos : quote?.media?.photos ?? [];
     return {
         provider: "x",
         url,
@@ -161,7 +198,7 @@ function normalizeFx(s: any, url: string): Post {
         avatar: s.author?.avatar_url ?? undefined,
         text: s.text,
         videos: rawVideos.filter(v => v.url).map(v => ({ url: v.url, thumbnail: v.thumbnail_url, type: v.type, width: sizeOf(v.width), height: sizeOf(v.height) })),
-        photos: (s.media?.photos ?? []).filter((p: any) => p.url).map((p: any) => ({ url: p.url, width: sizeOf(p.width), height: sizeOf(p.height) })),
+        photos: rawPhotos.filter((p: any) => p.url).map((p: any) => ({ url: p.url, width: sizeOf(p.width), height: sizeOf(p.height) })),
         createdAt: s.created_at,
         likes: num(s.likes), reposts: num(s.reposts), replies: num(s.replies), quotes: num(s.quotes), views: num(s.views),
         quote: quote ? { name: quote.author?.name, screenName: quote.author?.screen_name, text: quote.text, url: quote.url } : undefined,
@@ -196,7 +233,19 @@ function normalizeVx(t: any, url: string): Post {
     };
 }
 
-async function fetchX(link: PostLink): Promise<Post | null> {
+/** FxTwitter sometimes omits a quoted post's media; an FxEmbed host's Open Graph card still has it. */
+async function addQuoteMedia(post: Post, id: string, cfg: FetchConfig): Promise<Post> {
+    if (!post.quote || post.videos.length || post.photos.length) return post;
+    try {
+        note("quote post without media in API response: asking FxEmbed hosts");
+        const og = await ogViaProxies(`https://x.com/${post.screenName ?? "i"}/status/${id}`, "x.com", domainList(cfg.xDomains), o => !!(o.video || (o.image && !/profile_images/i.test(o.image))));
+        if (og?.video) post.videos = [{ url: og.video, thumbnail: og.image && !/profile_images/i.test(og.image) ? og.image : undefined, type: "video" }];
+        else if (og?.image && !/profile_images/i.test(og.image)) post.photos = [{ url: og.image }];
+    } catch { /* keep the text-only card */ }
+    return post;
+}
+
+async function fetchX(link: PostLink, cfg: FetchConfig): Promise<Post | null> {
     const id = link.id!;
     const ua = { "User-Agent": "Revenge-FxEmbedPreview" };
     let fallback = false;
@@ -204,7 +253,7 @@ async function fetchX(link: PostLink): Promise<Post | null> {
         const { status, json } = await getJson(`https://api.fxtwitter.com/2/status/${id}`, ua);
         if (status >= 200 && status < 300 && json) {
             if (json.code === 200 && json.status && json.status.type !== "tombstone")
-                return normalizeFx(json.status, `https://x.com/${json.status.author?.screen_name ?? link.username}/status/${id}`);
+                return addQuoteMedia(normalizeFx(json.status, `https://x.com/${json.status.author?.screen_name ?? link.username}/status/${id}`), id, cfg);
             const code = json.code ?? 0;
             fallback = code >= 500 || code === 429 || !json.status;
             if (!fallback) return null;
@@ -281,31 +330,38 @@ function normalizeReddit(json: any, fallbackUrl: string): Post | null {
     };
 }
 
-async function fetchReddit(link: PostLink): Promise<Post | null> {
+async function fetchReddit(link: PostLink, cfg: FetchConfig): Promise<Post | null> {
     let url = link.url;
     if (/\/\/redd\.it\//i.test(url) || /\/s\/[A-Za-z0-9]+/.test(url)) url = await resolveUrl(url);
     const id = /\/comments\/([a-z0-9]+)/i.exec(url)?.[1];
     if (!id) return null;
-    const { status, json } = await getJson(`https://www.reddit.com/comments/${id}.json?raw_json=1&limit=1`, { "User-Agent": BROWSER_UA }, 15000);
-    if (status < 200 || status >= 300 || !json) return null;
-    return normalizeReddit(json, url);
+    try {
+        const { status, json } = await getJson(`https://www.reddit.com/comments/${id}.json?raw_json=1&limit=1`, { "User-Agent": BROWSER_UA }, 15000);
+        if (status >= 200 && status < 300 && json) {
+            const post = normalizeReddit(json, url);
+            if (post) return post;
+            note("reddit.com JSON had no usable post");
+        }
+    } catch { /* try the proxy hosts */ }
+
+    // reddit.com often blocks anonymous JSON; rxddit-style hosts expose the post through Open Graph.
+    const og = await ogViaProxies(url, "reddit.com", domainList(cfg.redditDomains), o => !!(o.video || o.image || o.title));
+    return og ? postFromOg("reddit", url, og) : null;
 }
 
 // ---------- TikTok ----------
 
 async function fetchTikTok(link: PostLink, cfg: FetchConfig): Promise<Post | null> {
-    // 1) An FxEmbed-style proxy (tnktok.com by default) exposes the playable video through Open Graph tags.
-    if (cfg.tiktokDomain.trim()) {
-        try {
-            const og = await fetchOg(swapHost(link.url, "tiktok.com", cfg.tiktokDomain), BOT_UA);
-            if (og && (og.video || og.image)) return postFromOg("tiktok", link.url, og);
-        } catch { /* fall through to oEmbed */ }
-    }
-
-    // 2) TikTok's public oEmbed gives title, creator and a thumbnail (no playable video).
+    // Short links first: the proxy hosts and oEmbed both prefer the full /@user/video/<id> URL.
     let url = link.url;
     if (/\/\/(?:vm|vt)\.tiktok\.com\/|\/\/(?:www\.)?tiktok\.com\/t\//i.test(url)) url = await resolveUrl(url);
     url = url.replace(/[?#].*$/, "");
+
+    // 1) FxTikTok-style hosts expose the playable video through Open Graph tags.
+    const og = await ogViaProxies(url, "tiktok.com", domainList(cfg.tiktokDomains), o => !!(o.video || o.image));
+    if (og) return postFromOg("tiktok", url, og);
+
+    // 2) TikTok's public oEmbed gives title, creator and a thumbnail (no playable video).
     try {
         const { status, json } = await getJson(`https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`, { "User-Agent": BROWSER_UA }, 15000);
         if (status >= 200 && status < 300 && json && (json.thumbnail_url || json.title || json.author_name)) {
@@ -322,8 +378,8 @@ async function fetchTikTok(link: PostLink, cfg: FetchConfig): Promise<Post | nul
     } catch { /* try Open Graph on the page itself */ }
 
     try {
-        const og = await fetchOg(url, BOT_UA);
-        return og ? postFromOg("tiktok", url, og) : null;
+        const own = await fetchOg(url, BOT_UA);
+        return own ? postFromOg("tiktok", url, own) : null;
     } catch {
         return null;
     }
@@ -332,17 +388,14 @@ async function fetchTikTok(link: PostLink, cfg: FetchConfig): Promise<Post | nul
 // ---------- Instagram ----------
 
 async function fetchInstagram(link: PostLink, cfg: FetchConfig): Promise<Post | null> {
-    // A proxy domain (e.g. eeinstagram.com) usually returns usable Open Graph tags including video.
-    if (cfg.instagramDomain.trim()) {
-        try {
-            const og = await fetchOg(swapHost(link.url, "instagram.com", cfg.instagramDomain), BOT_UA);
-            if (og && (og.video || og.image)) return postFromOg("instagram", link.url, og);
-        } catch { /* fall back to the real page */ }
-    }
+    // InstaFix-style hosts (ddinstagram.com, instagramez.com, ...) usually return usable Open Graph tags including video.
+    const og = await ogViaProxies(link.url, "instagram.com", domainList(cfg.instagramDomains), o => !!(o.video || o.image));
+    if (og) return postFromOg("instagram", link.url, og);
+
     // Direct page: often a login wall, in which case there is nothing to show and Discord's own embed stays.
     try {
-        const og = await fetchOg(link.url, BROWSER_UA);
-        return og && (og.image || og.video) ? postFromOg("instagram", link.url, og) : null;
+        const own = await fetchOg(link.url, BROWSER_UA);
+        return own && (own.image || own.video) ? postFromOg("instagram", link.url, own) : null;
     } catch {
         return null;
     }
@@ -366,8 +419,8 @@ export function peekPost(key: string): Post | null | undefined {
 
 function fetchPost(link: PostLink, cfg: FetchConfig): Promise<Post | null> {
     switch (link.provider) {
-        case "x": return fetchX(link);
-        case "reddit": return fetchReddit(link);
+        case "x": return fetchX(link, cfg);
+        case "reddit": return fetchReddit(link, cfg);
         case "tiktok": return fetchTikTok(link, cfg);
         case "instagram": return fetchInstagram(link, cfg);
     }
@@ -391,6 +444,20 @@ export function loadPost(link: PostLink, cfg: FetchConfig): Promise<Post | null>
         cache.delete(oldest);
     }
     return entry.promise;
+}
+
+/** Runs a lookup without touching the cache and returns the step log (used by "Test a link"). */
+export async function loadPostTraced(link: PostLink, cfg: FetchConfig): Promise<{ post: Post | null; log: string[]; }> {
+    const log: string[] = [];
+    trace = log;
+    try {
+        return { post: await fetchPost(link, cfg), log };
+    } catch (e: any) {
+        log.push(`ERROR: ${String(e?.message ?? e)}`);
+        return { post: null, log };
+    } finally {
+        trace = null;
+    }
 }
 
 export const clearPostCache = () => cache.clear();

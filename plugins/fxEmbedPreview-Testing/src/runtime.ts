@@ -3,8 +3,8 @@ import { FluxDispatcher } from "@vendetta/metro/common";
 import { before } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
-import { type FetchConfig, loadPost, type PostLink, peekPost } from "./api";
-import { composeEmbeds, type EmbedOptions, isOurs, parseLinks } from "./embeds";
+import { type FetchConfig, loadPost, loadPostTraced, type PostLink, peekPost } from "./api";
+import { buildEmbeds, composeEmbeds, type EmbedOptions, isOurs, parseLinks } from "./embeds";
 
 const MessageStore = findByStoreName("MessageStore");
 const ChannelStore = findByStoreName("ChannelStore");
@@ -30,8 +30,13 @@ function trim(map: Map<string, unknown> | Set<string>, max = 500) {
     }
 }
 
-export const DEFAULT_TIKTOK_DOMAIN = "tnktok.com";
-export const DEFAULT_INSTAGRAM_DOMAIN = "eeinstagram.com";
+// FxEmbed-style hosts, tried in parallel (first useful answer wins). Edit them in settings if one goes down.
+export const DEFAULT_DOMAINS = {
+    tiktokDomains: "tnktok.com, tfxktok.com",
+    instagramDomains: "ddinstagram.com, instagramez.com",
+    redditDomains: "rxddit.com, redditez.com",
+    xDomains: "fixupx.com, fixvx.com"
+} as const;
 
 export const getOptions = (): EmbedOptions => ({
     hideOriginal: storage.hideOriginal !== false,
@@ -39,6 +44,7 @@ export const getOptions = (): EmbedOptions => ({
     showQuote: storage.showQuote !== false,
     showPoll: storage.showPoll !== false,
     maxMedia: 4,
+    photoStyle: storage.photoStyle === "card" || storage.photoStyle === "thumb" ? storage.photoStyle : "native",
     providers: {
         x: storage.enableX !== false,
         reddit: storage.enableReddit !== false,
@@ -47,10 +53,36 @@ export const getOptions = (): EmbedOptions => ({
     }
 });
 
+const domainsOf = (key: keyof typeof DEFAULT_DOMAINS) => typeof storage[key] === "string" ? storage[key] as string : DEFAULT_DOMAINS[key];
+
 export const getConfig = (): FetchConfig => ({
-    tiktokDomain: typeof storage.tiktokDomain === "string" ? storage.tiktokDomain : DEFAULT_TIKTOK_DOMAIN,
-    instagramDomain: typeof storage.instagramDomain === "string" ? storage.instagramDomain : DEFAULT_INSTAGRAM_DOMAIN
+    tiktokDomains: domainsOf("tiktokDomains"),
+    instagramDomains: domainsOf("instagramDomains"),
+    redditDomains: domainsOf("redditDomains"),
+    xDomains: domainsOf("xDomains")
 });
+
+/** "Test a link": runs the real lookup (no cache) and reports every step, so failures are visible instead of silent. */
+export async function diagnose(input: string): Promise<string> {
+    const links = parseLinks(input.trim(), { x: true, reddit: true, instagram: true, tiktok: true });
+    if (!links.length) return "No supported link found.\nSupported: x.com / twitter.com post, reddit post, instagram post or reel, tiktok video.";
+
+    const opts = getOptions();
+    const out: string[] = [];
+    for (const link of links) {
+        out.push(`# ${link.provider}: ${link.url}`);
+        const { post, log } = await loadPostTraced(link, getConfig());
+        out.push(...log);
+        if (!post) { out.push("=> NO POST: every source failed (see the lines above)."); continue; }
+        out.push(`=> post found: ${post.videos.length} video, ${post.photos.length} photo, ${post.text?.length ?? 0} chars of text, quote: ${post.quote ? "yes" : "no"}`);
+        if (post.videos[0]) out.push(`   video: ${post.videos[0].url.replace(/^https?:\/\//, "").slice(0, 70)}`);
+        if (post.photos[0]) out.push(`   photo: ${post.photos[0].url.replace(/^https?:\/\//, "").slice(0, 70)}`);
+        const embeds = buildEmbeds(post, opts);
+        out.push(`=> ${embeds.length} embed(s) would be shown: ${embeds.map(e => e.type).join(", ") || "none"}`);
+    }
+    out.push("", "If a post was found but nothing shows in chat, change \"Photo display\" in settings and clear the cache.");
+    return out.join("\n");
+}
 
 function track(link: PostLink, ref: Ref) {
     let refs = pending.get(link.key);
