@@ -1,0 +1,15 @@
+{
+  "name": "FxEmbedPreview",
+  "description": "FxEmbed-style previews for X/Twitter (plus Reddit, TikTok, Instagram) links. Message text is never changed.",
+  "authors": [
+    {
+      "name": "You",
+      "id": "0"
+    }
+  ],
+  "main": "index.js",
+  "vendetta": {
+    "icon": "ic_link"
+  },
+  "hash": "b5c4a78e9d0e47596f484ec283190a37490af49c16dcc581474251f1bc992405"
+}
