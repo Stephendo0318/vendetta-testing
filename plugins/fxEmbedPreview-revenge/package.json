@@ -1,0 +1,14 @@
+{
+    "name": "fxembed-preview-revenge",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "build": "node build.mjs",
+        "typecheck": "tsc --noEmit"
+    },
+    "devDependencies": {
+        "esbuild": "^0.21.0",
+        "typescript": "^5.4.0",
+        "vendetta-types": "latest"
+    }
+}
