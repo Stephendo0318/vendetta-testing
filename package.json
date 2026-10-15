@@ -14,17 +14,5 @@
 		"rollup": "^3.9.1",
 		"rollup-plugin-esbuild": "^5.0.0",
 		"vendetta-types": "latest"
-	},
-	"pnpm": {
-		"allowedBuilds": [
-			"@swc/core",
-			"esbuild"
-		],
-		"peerDependencyRules": {
-			"ignoreMissing": [
-				"react",
-				"react-native"
-			]
-		}
 	}
 }

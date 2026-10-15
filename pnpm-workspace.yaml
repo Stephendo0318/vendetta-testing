@@ -1,2 +1,12 @@
 packages:
-  - plugins/*
+  - "plugins/*"
+
+# This is where your configuration blocks belong in pnpm v11+
+allowBuilds:
+  - "@swc/core"
+  - "esbuild"
+
+peerDependencyRules:
+  ignoreMissing:
+    - "react"
+    - "react-native"
