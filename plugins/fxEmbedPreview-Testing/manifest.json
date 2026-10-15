@@ -1,5 +1,5 @@
 {
-    "name": "FxEmbedPreview",
+    "name": "FxEmbedPreview-Testing",
     "description": "Local FxEmbed-style previews for X/Twitter links. Message text is never changed.",
     "authors": [{ "name": "You", "id": "0" }],
     "main": "src/index.ts",
