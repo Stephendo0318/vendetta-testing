@@ -18,7 +18,18 @@ jobs:
               with:
                   node-version: "16"
 
-            - run: npm install --global pnpm
+            - run: npm install --global pnpm@7
+
+            - name: Check pnpm version
+              run: pnpm -v
+
+            - name: Approve pnpm build scripts (no-op if unsupported)
+              run: |
+                # Approve native build scripts non-interactively if pnpm supports it.
+                # Continue even if the command is not available or fails.
+                if command -v pnpm >/dev/null 2>&1; then
+                  pnpm approve-builds --all || true
+                fi
 
             - name: Install deps
               run: pnpm m i
