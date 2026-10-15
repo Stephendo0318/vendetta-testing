@@ -1,6 +1,10 @@
 packages:
   - "plugins/*"
 
+allowBuilds:
+  '@swc/core': true
+  esbuild: true
+
 # pnpm v11+ configuration blocks must be under shared-workspace-config
 shared-workspace-config:
   allowBuilds:
